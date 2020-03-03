@@ -1,0 +1,4 @@
+Initial_Message:  db 'BCD_counter: xx ', 0
+
+	Set_Cursor(1, 1)
+    Send_Constant_String(#Initial_Message)

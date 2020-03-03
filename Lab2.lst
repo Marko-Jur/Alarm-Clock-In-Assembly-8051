@@ -1,0 +1,1093 @@
+0000              1   ; ISR_example.asm: a) Increments/decrements a BCD variable every half second using
+0000              2   ; an ISR for timer 2; b) Generates a 2kHz square wave at pin P3.7 using
+0000              3   ; an ISR for timer 0; and c) in the 'main' loop it displays the variable
+0000              4   ; incremented/decremented using the ISR for timer 2 on the LCD.  Also resets it to 
+0000              5   ; zero if the 'BOOT' pushbutton connected to P4.5 is pressed.
+                  7   $LIST
+0000              9   
+0000             10   ; There is a couple of typos in MODLP51 in the definition of the timer 0/1 reload
+0000             11   ; special function registers (SFRs), so:
+0000             12   
+0000             13   TIMER0_RELOAD_L DATA 0xf2
+0000             14   TIMER1_RELOAD_L DATA 0xf3
+0000             15   TIMER0_RELOAD_H DATA 0xf4
+0000             16   TIMER1_RELOAD_H DATA 0xf5
+0000             17   
+0000             18   CLK           EQU 22118400 ; Microcontroller system crystal frequency in Hz
+0000             19   TIMER0_RATE   EQU 4096     ; 2048Hz squarewave (peak amplitude of CEM-1203 speaker)
+0000             20   TIMER0_RELOAD EQU ((65536-(CLK/TIMER0_RATE)))
+0000             21   TIMER2_RATE   EQU 1000     ; 1000Hz, for a timer tick of 1ms
+0000             22   TIMER2_RELOAD EQU ((65536-(CLK/TIMER2_RATE)))
+0000             23   
+0000             24   BOOT_BUTTON   equ P4.5
+0000             25   HOUR_BUTTON        equ P0.1
+0000             26   SOUND_OUT     equ P3.7
+0000             27   UPDOWN        equ P0.0
+0000             28   SAVE_ALARM    equ P2.4
+0000             29   STOP_ALARM    equ P2.0
+0000             30   ALARM_MODE    equ P0.4
+0000             31   STOPWATCH_MODE   equ P2.1
+0000             32   TIMER_mode                equ P2.5
+0000             33   
+0000             34   
+0000             35   ; Reset vector
+0000             36   org 0x0000
+0000 02051E      37       ljmp main
+0003             38   
+0003             39   ; External interrupt 0 vector (not used in this code)
+0003             40   org 0x0003
+0003 32          41            reti
+0004             42   
+0004             43   ; Timer/Counter 0 overflow interrupt vector
+000B             44   org 0x000B
+000B 020113      45            ljmp Timer0_ISR
+000E             46   
+000E             47   ; External interrupt 1 vector (not used in this code)
+0013             48   org 0x0013
+0013 32          49            reti
+0014             50   
+0014             51   ; Timer/Counter 1 overflow interrupt vector (not used in this code)
+001B             52   org 0x001B
+001B 32          53            reti
+001C             54   
+001C             55   ; Serial port receive/transmit interrupt vector (not used in this code)
+0023             56   org 0x0023 
+0023 32          57            reti
+0024             58            
+0024             59   ; Timer/Counter 2 overflow interrupt vector
+002B             60   org 0x002B
+002B 02012D      61            ljmp Timer2_ISR
+002E             62   
+002E             63   ; In the 8051 we can define direct access variables starting at location 0x30 up to location 0x7F
+0030             64   dseg at 0x30
+0030             65   Count1ms:     ds 2 ; Used to determine when half second has passed
+0032             66   BCD_counter:  ds 1 ; The BCD counter incrememted in the ISR and displayed in the main loop
+0033             67   MIN_counter:  ds 3
+0036             68   HOURS_counter:  ds 4
+003A             69   AM_PM_flag: ds 5
+003F             70   ALARM_hours: ds 6
+0045             71   ALARM_minutes: ds 7
+004C             72   ALARM_am_pm_flag:ds 8
+0054             73   ALARM_stop: ds 1
+0055             74   STRING_COUNTER: ds 1
+0056             75   STOPWATCH_starter: ds 1
+0057             76   STOPWATCH_minutes: ds 2
+0059             77   STOPWATCH_seconds: ds 2
+005B             78   TIMER_starter: ds 2
+005D             79   TIMER_100: ds 2
+005F             80   AM_PM_changer: ds 2
+0061             81   
+0061             82   
+0061             83   ; In the 8051 we have variables that are 1-bit in size.  We can use the setb, clr, jb, and jnb
+0061             84   ; instructions with these variables.  This is how you define a 1-bit variable:
+0000             85   bseg
+0000             86   half_seconds_flag: dbit 1 ; Set to one in the ISR every time 500 ms had passed
+0001             87   
+002E             88   cseg
+002E             89   ; These 'equ' must match the wiring between the microcontroller and the LCD!
+002E             90   LCD_RS equ P1.1
+002E             91   LCD_RW equ P1.2
+002E             92   LCD_E  equ P1.3
+002E             93   LCD_D4 equ P3.2
+002E             94   LCD_D5 equ P3.3
+002E             95   LCD_D6 equ P3.4
+002E             96   LCD_D7 equ P3.5
+                 98   	$LIST
+00DC            100   
+00DC            101   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+00DC            102   
+00DC            103   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;    
+00DC            104       
+00DC            105   
+00DC            106   ;---------------------------------;
+00DC            107   ; Routine to initialize the ISR   ;
+00DC            108   ; for timer 0                     ;
+00DC            109   ;---------------------------------;
+00DC            110   Timer0_Init:
+00DC E589       111            mov a, TMOD
+00DE 54F0       112            anl a, #0xf0 ; Clear the bits for timer 0
+00E0 4401       113            orl a, #0x01 ; Configure timer 0 as 16-timer
+00E2 F589       114            mov TMOD, a
+00E4 758CEA     115            mov TH0, #high(TIMER0_RELOAD)
+00E7 758AE8     116            mov TL0, #low(TIMER0_RELOAD)
+00EA            117            ; Set autoreload value
+00EA 75F4EA     118            mov TIMER0_RELOAD_H, #high(TIMER0_RELOAD)
+00ED 75F2E8     119            mov TIMER0_RELOAD_L, #low(TIMER0_RELOAD)
+00F0            120            ; Enable the timer and interrupts
+00F0 D2A9       121       setb ET0  ; Enable timer 0 interrupt
+00F2 D28C       122       setb TR0  ; Start timer 0
+00F4 753601     123       mov HOURS_counter, #0x01 ;Initialize Hours here
+00F7 753300     124       mov MIN_counter, #0x0 ;Initiliaze Minutes here
+00FA 753A00     125       mov AM_PM_flag, #0x0 ;Initialize am_pm flag here
+00FD 753F00     126       mov ALARM_hours, #0x0 ;Initialize alarm hours here
+0100 754500     127       mov ALARM_minutes, #0x0 ;Initialize alarm minutes here
+0103 755401     128       mov ALARM_stop, #0x01 ;Initialize alarm stop here
+0106 755700     129       mov STOPWATCH_minutes, #0x00 ;Initialize string counter here
+0109 755900     130       mov STOPWATCH_seconds,#0x00
+010C 755600     131       mov STOPWATCH_starter,#0x00
+010F 755D99     132       mov TIMER_100,#0x99
+0112 22         133            ret
+0113            134   
+0113            135   ;---------------------------------;
+0113            136   ; ISR for timer 0.  Set to execute;
+0113            137   ; every 1/4096Hz to generate a    ;
+0113            138   ; 2048 Hz square wave at pin P3.7 ;
+0113            139   ;---------------------------------;
+0113            140   Timer0_ISR:
+0113            141            ;clr TF0  ; According to the data sheet this is done for us already.
+0113            142            ;cpl SOUND_OUT ; Connect speaker to P3.7!
+0113 32         143            reti
+0114            144   
+0114            145   ;---------------------------------;
+0114            146   ; Routine to initialize the ISR   ;
+0114            147   ; for timer 2                     ;
+0114            148   ;---------------------------------;
+0114            149   Timer2_Init:
+0114 75C800     150            mov T2CON, #0 ; Stop timer/counter.  Autoreload mode.
+0117 75CDA9     151            mov TH2, #high(TIMER2_RELOAD)
+011A 75CC9A     152            mov TL2, #low(TIMER2_RELOAD)
+011D            153            ; Set the reload value
+011D 75CBA9     154            mov RCAP2H, #high(TIMER2_RELOAD)
+0120 75CA9A     155            mov RCAP2L, #low(TIMER2_RELOAD)
+0123            156            ; Init One millisecond interrupt counter.  It is a 16-bit variable made with two 8-bit parts
+0123 E4         157            clr a
+0124 F530       158            mov Count1ms+0, a
+0126 F531       159            mov Count1ms+1, a
+0128            160            ; Enable the timer and interrupts
+0128 D2AD       161       setb ET2  ; Enable timer 2 interrupt
+012A D2CA       162       setb TR2  ; Enable timer 2
+012C 22         163            ret
+012D            164   
+012D            165   ;---------------------------------;
+012D            166   ; ISR for timer 2                 ;
+012D            167   ;---------------------------------;
+012D            168   Timer2_ISR:
+012D C2CF       169            clr TF2  ; Timer 2 doesn't clear TF2 automatically. Do it in ISR
+012F B2B6       170            cpl P3.6 ; To check the interrupt rate with oscilloscope. It must be precisely a 1 ms pulse.
+0131            171            
+0131            172            ; The two registers used in the ISR must be saved in the stack
+0131 C0E0       173            push acc
+0133 C0D0       174            push psw
+0135            175            
+0135            176            ; Increment the 16-bit one mili second counter
+0135 0530       177            inc Count1ms+0    ; Increment the low 8-bits first
+0137 E530       178            mov a, Count1ms+0 ; If the low 8-bits overflow, then increment high 8-bits
+0139 7002       179            jnz Inc_Done
+013B 0531       180            inc Count1ms+1
+013D            181   
+013D            182   Inc_Done:
+013D            183            ; Check if half second has passed
+013D E530       184            mov a, Count1ms+0
+013F B4E841     185            cjne a, #low(1000), Timer2_ISR_done ; Warning: this instruction changes the carry flag!
+0142 E531       186            mov a, Count1ms+1
+0144 B4033C     187            cjne a, #high(1000), Timer2_ISR_done
+0147            188            
+0147            189            ; 500 milliseconds have passed.  Set a flag so the main program knows
+0147 D200       190            setb half_seconds_flag ; Let the main program know half second had passed
+0149 B28C       191            cpl TR0 ; Enable/disable timer/counter 0. This line creates a beep-silence-beep-silence sound.
+014B            192            ; Reset to zero the milli-seconds counter, it is a 16-bit variable
+014B E4         193            clr a
+014C F530       194            mov Count1ms+0, a
+014E F531       195            mov Count1ms+1, a
+0150            196            ; Increment the BCD counter
+0150 E532       197            mov a, BCD_counter
+0152 308004     198            jnb UPDOWN, Timer2_ISR_decrement
+0155            199            
+0155            200   ;adding  
+0155            201            
+0155            202   adding1:
+0155 2401       203            add a, #0x01
+0157 8002       204            sjmp Timer2_ISR_da
+0159            205   Timer2_ISR_decrement:
+0159 2499       206            add a, #0x99 ; Adding the 10-complement of -1 is like subtracting 1.
+015B            207   Timer2_ISR_da:
+015B D4         208            da a ; Decimal adjust instruction.  Check datasheet for more details!
+015C B46002     209            cjne a,#0x60,print ; adjust seconds limit here
+015F 7400       210            mov a,#0x00
+0161            211            
+0161            212            
+0161            213   print:
+0161 F532       214            mov BCD_counter, a
+0163 B4001D     215            cjne a,#0x00, Timer2_ISR_done
+0166            216            
+0166            217   add_min:
+0166 E533       218            mov a, MIN_counter
+0168 2401       219            add a,#0x01
+016A D4         220            da a
+016B B46002     221            cjne a,#0x60, plus_minutes ; adjust minutes limit here
+016E 7400       222            mov a,#0x00
+0170            223            
+0170            224   plus_minutes:
+0170 F533       225            mov MIN_counter, a
+0172 B4000E     226            cjne a,#0x00,Timer2_ISR_done    
+0175            227    
+0175            228   add_hour:
+0175 E536       229            mov a, HOURS_counter
+0177 2401       230            add a,#0x01
+0179 D4         231            da a
+017A B41302     232            cjne a,#0x13, plus_hours ; adjust hours limit here
+017D 7401       233            mov a,#0x01
+017F            234   
+017F            235   plus_hours:
+017F F536       236            mov HOURS_counter, a
+0181 7400       237            mov a,#0x00
+0183            238            
+0183            239            
+0183            240   Timer2_ISR_done:
+0183 D0D0       241            pop psw
+0185 D0E0       242            pop acc
+0187 32         243            reti
+0188            244            
+0188            245            
+0188            246   
+0188            247   ; These custom characters copied from https://cdn.instructables.com/ORIG/FGY/5J1E/GYFYDR5L/FGY5J1EGYFYDR5L.txt
+0188            248   Custom_Characters:
+0188 7440       249            mov a, #40h
+018A 120083     249            lcall ?WriteCommand ; Custom characters are stored starting at address 40h
+018D            250   ; Custom made character 0
+018D 7407       251            mov a, #00111B
+018F 12007E     251            lcall ?WriteData
+0192 740F       252            mov a, #01111B
+0194 12007E     252            lcall ?WriteData
+0197 741F       253            mov a, #11111B
+0199 12007E     253            lcall ?WriteData
+019C 741F       254            mov a, #11111B
+019E 12007E     254            lcall ?WriteData
+01A1 741F       255            mov a, #11111B
+01A3 12007E     255            lcall ?WriteData
+01A6 741F       256            mov a, #11111B
+01A8 12007E     256            lcall ?WriteData
+01AB 741F       257            mov a, #11111B
+01AD 12007E     257            lcall ?WriteData
+01B0 741F       258            mov a, #11111B
+01B2 12007E     258            lcall ?WriteData
+01B5            259   ; Custom made character 1
+01B5 741F       260            mov a, #11111B
+01B7 12007E     260            lcall ?WriteData
+01BA 741F       261            mov a, #11111B
+01BC 12007E     261            lcall ?WriteData
+01BF 741F       262            mov a, #11111B
+01C1 12007E     262            lcall ?WriteData
+01C4 7400       263            mov a, #00000B
+01C6 12007E     263            lcall ?WriteData
+01C9 7400       264            mov a, #00000B
+01CB 12007E     264            lcall ?WriteData
+01CE 7400       265            mov a, #00000B
+01D0 12007E     265            lcall ?WriteData
+01D3 7400       266            mov a, #00000B
+01D5 12007E     266            lcall ?WriteData
+01D8 7400       267            mov a, #00000B
+01DA 12007E     267            lcall ?WriteData
+01DD            268   ; Custom made character 2
+01DD 741C       269            mov a, #11100B
+01DF 12007E     269            lcall ?WriteData
+01E2 741E       270            mov a, #11110B
+01E4 12007E     270            lcall ?WriteData
+01E7 741F       271            mov a, #11111B
+01E9 12007E     271            lcall ?WriteData
+01EC 741F       272            mov a, #11111B
+01EE 12007E     272            lcall ?WriteData
+01F1 741F       273            mov a, #11111B
+01F3 12007E     273            lcall ?WriteData
+01F6 741F       274            mov a, #11111B
+01F8 12007E     274            lcall ?WriteData
+01FB 741F       275            mov a, #11111B
+01FD 12007E     275            lcall ?WriteData
+0200 741F       276            mov a, #11111B
+0202 12007E     276            lcall ?WriteData
+0205            277   ; Custom made character 3
+0205 741F       278            mov a, #11111B
+0207 12007E     278            lcall ?WriteData
+020A 741F       279            mov a, #11111B
+020C 12007E     279            lcall ?WriteData
+020F 741F       280            mov a, #11111B
+0211 12007E     280            lcall ?WriteData
+0214 741F       281            mov a, #11111B
+0216 12007E     281            lcall ?WriteData
+0219 741F       282            mov a, #11111B
+021B 12007E     282            lcall ?WriteData
+021E 741F       283            mov a, #11111B
+0220 12007E     283            lcall ?WriteData
+0223 740F       284            mov a, #01111B
+0225 12007E     284            lcall ?WriteData
+0228 7407       285            mov a, #00111B
+022A 12007E     285            lcall ?WriteData
+022D            286   ; Custom made character 4
+022D 7400       287            mov a, #00000B
+022F 12007E     287            lcall ?WriteData
+0232 7400       288            mov a, #00000B
+0234 12007E     288            lcall ?WriteData
+0237 7400       289            mov a, #00000B
+0239 12007E     289            lcall ?WriteData
+023C 7400       290            mov a, #00000B
+023E 12007E     290            lcall ?WriteData
+0241 7400       291            mov a, #00000B
+0243 12007E     291            lcall ?WriteData
+0246 741F       292            mov a, #11111B
+0248 12007E     292            lcall ?WriteData
+024B 741F       293            mov a, #11111B
+024D 12007E     293            lcall ?WriteData
+0250 741F       294            mov a, #11111B
+0252 12007E     294            lcall ?WriteData
+0255            295   ; Custom made character 5
+0255 741F       296            mov a, #11111B
+0257 12007E     296            lcall ?WriteData
+025A 741F       297            mov a, #11111B
+025C 12007E     297            lcall ?WriteData
+025F 741F       298            mov a, #11111B
+0261 12007E     298            lcall ?WriteData
+0264 741F       299            mov a, #11111B
+0266 12007E     299            lcall ?WriteData
+0269 741F       300            mov a, #11111B
+026B 12007E     300            lcall ?WriteData
+026E 741F       301            mov a, #11111B
+0270 12007E     301            lcall ?WriteData
+0273 741E       302            mov a, #11110B
+0275 12007E     302            lcall ?WriteData
+0278 741C       303            mov a, #11100B
+027A 12007E     303            lcall ?WriteData
+027D            304   ; Custom made character 6
+027D 741F       305            mov a, #11111B
+027F 12007E     305            lcall ?WriteData
+0282 741F       306            mov a, #11111B
+0284 12007E     306            lcall ?WriteData
+0287 741F       307            mov a, #11111B
+0289 12007E     307            lcall ?WriteData
+028C 7400       308            mov a, #00000B
+028E 12007E     308            lcall ?WriteData
+0291 7400       309            mov a, #00000B
+0293 12007E     309            lcall ?WriteData
+0296 7400       310            mov a, #00000B
+0298 12007E     310            lcall ?WriteData
+029B 741F       311            mov a, #11111B
+029D 12007E     311            lcall ?WriteData
+02A0 741F       312            mov a, #11111B
+02A2 12007E     312            lcall ?WriteData
+02A5            313   ; Custom made character 7
+02A5 741F       314            mov a, #11111B
+02A7 12007E     314            lcall ?WriteData
+02AA 7400       315            mov a, #00000B
+02AC 12007E     315            lcall ?WriteData
+02AF 7400       316            mov a, #00000B
+02B1 12007E     316            lcall ?WriteData
+02B4 7400       317            mov a, #00000B
+02B6 12007E     317            lcall ?WriteData
+02B9 7400       318            mov a, #00000B
+02BB 12007E     318            lcall ?WriteData
+02BE 741F       319            mov a, #11111B
+02C0 12007E     319            lcall ?WriteData
+02C3 741F       320            mov a, #11111B
+02C5 12007E     320            lcall ?WriteData
+02C8 741F       321            mov a, #11111B
+02CA 12007E     321            lcall ?WriteData
+02CD 22         322            ret
+02CE            323   
+02CE            324   ; For all the big numbers, the starting column is passed in register R1
+02CE            325   Draw_big_0:
+02CE E9         326            mov a, R1
+02CF 4480       327            orl a, #0x80 
+02D1 120083     328            lcall ?WriteCommand 
+02D4 7400       329            mov a, #0
+02D6 12007E     329            lcall ?WriteData  
+02D9 7401       330            mov a, #1
+02DB 12007E     330            lcall ?WriteData 
+02DE 7402       331            mov a, #2
+02E0 12007E     331            lcall ?WriteData
+02E3 7420       332            mov a, #' '
+02E5 12007E     332            lcall ?WriteData
+02E8 E9         333            mov a, R1
+02E9 44C0       334            orl a, #0xc0
+02EB 120083     335            lcall ?WriteCommand 
+02EE 7403       336            mov a, #3
+02F0 12007E     336            lcall ?WriteData  
+02F3 7404       337            mov a, #4
+02F5 12007E     337            lcall ?WriteData  
+02F8 7405       338            mov a, #5
+02FA 12007E     338            lcall ?WriteData
+02FD 7420       339            mov a, #' '
+02FF 12007E     339            lcall ?WriteData
+0302 22         340            ret
+0303            341            
+0303            342   Draw_big_1:
+0303 E9         343            mov a, R1
+0304 4480       344            orl a, #0x80 
+0306 120083     345            lcall ?WriteCommand 
+0309 7401       346            mov a, #1
+030B 12007E     346            lcall ?WriteData
+030E 7402       347            mov a, #2
+0310 12007E     347            lcall ?WriteData
+0313 7420       348            mov a, #' '
+0315 12007E     348            lcall ?WriteData
+0318 7420       349            mov a, #' '
+031A 12007E     349            lcall ?WriteData
+031D E9         350            mov a, R1
+031E 44C0       351            orl a, #0xc0
+0320 120083     352            lcall ?WriteCommand 
+0323 7404       353            mov a, #4
+0325 12007E     353            lcall ?WriteData
+0328 74FF       354            mov a, #255
+032A 12007E     354            lcall ?WriteData
+032D 7404       355            mov a, #4
+032F 12007E     355            lcall ?WriteData
+0332 7420       356            mov a, #' '
+0334 12007E     356            lcall ?WriteData
+0337 22         357            ret
+0338            358   
+0338            359   Draw_big_2:
+0338 E9         360            mov a, R1
+0339 4480       361            orl a, #0x80 
+033B 120083     362            lcall ?WriteCommand 
+033E 7406       363            mov a, #6
+0340 12007E     363            lcall ?WriteData
+0343 7406       364            mov a, #6
+0345 12007E     364            lcall ?WriteData
+0348 7402       365            mov a, #2
+034A 12007E     365            lcall ?WriteData
+034D 7420       366            mov a, #' '
+034F 12007E     366            lcall ?WriteData
+0352 E9         367            mov a, R1
+0353 44C0       368            orl a, #0xc0
+0355 120083     369            lcall ?WriteCommand 
+0358 7403       370            mov a, #3
+035A 12007E     370            lcall ?WriteData
+035D 7407       371            mov a, #7
+035F 12007E     371            lcall ?WriteData
+0362 7407       372            mov a, #7
+0364 12007E     372            lcall ?WriteData
+0367 7420       373            mov a, #' '
+0369 12007E     373            lcall ?WriteData
+036C 22         374            ret
+036D            375   
+036D            376   Draw_big_3:
+036D E9         377            mov a, R1
+036E 4480       378            orl a, #0x80 
+0370 120083     379            lcall ?WriteCommand 
+0373 7406       380            mov a, #6
+0375 12007E     380            lcall ?WriteData
+0378 7406       381            mov a, #6
+037A 12007E     381            lcall ?WriteData
+037D 7402       382            mov a, #2
+037F 12007E     382            lcall ?WriteData
+0382 7420       383            mov a, #' '
+0384 12007E     383            lcall ?WriteData
+0387 E9         384            mov a, R1
+0388 44C0       385            orl a, #0xc0
+038A 120083     386            lcall ?WriteCommand 
+038D 7407       387            mov a, #7
+038F 12007E     387            lcall ?WriteData
+0392 7407       388            mov a, #7
+0394 12007E     388            lcall ?WriteData
+0397 7405       389            mov a, #5
+0399 12007E     389            lcall ?WriteData
+039C 7420       390            mov a, #' '
+039E 12007E     390            lcall ?WriteData
+03A1 22         391            ret
+03A2            392   
+03A2            393   Draw_big_4:
+03A2 E9         394            mov a, R1
+03A3 4480       395            orl a, #0x80 
+03A5 120083     396            lcall ?WriteCommand 
+03A8 7403       397            mov a, #3
+03AA 12007E     397            lcall ?WriteData
+03AD 7404       398            mov a, #4
+03AF 12007E     398            lcall ?WriteData
+03B2 7402       399            mov a, #2
+03B4 12007E     399            lcall ?WriteData
+03B7 7420       400            mov a, #' '
+03B9 12007E     400            lcall ?WriteData
+03BC E9         401            mov a, R1
+03BD 44C0       402            orl a, #0xc0
+03BF 120083     403            lcall ?WriteCommand 
+03C2 7420       404            mov a, #' '
+03C4 12007E     404            lcall ?WriteData
+03C7 7420       405            mov a, #' '
+03C9 12007E     405            lcall ?WriteData
+03CC 74FF       406            mov a, #255
+03CE 12007E     406            lcall ?WriteData
+03D1 7420       407            mov a, #' '
+03D3 12007E     407            lcall ?WriteData
+03D6 22         408            ret
+03D7            409   
+03D7            410   Draw_big_5:
+03D7 E9         411            mov a, R1
+03D8 4480       412            orl a, #0x80 
+03DA 120083     413            lcall ?WriteCommand 
+03DD 74FF       414            mov a, #255
+03DF 12007E     414            lcall ?WriteData
+03E2 7406       415            mov a, #6
+03E4 12007E     415            lcall ?WriteData
+03E7 7406       416            mov a, #6
+03E9 12007E     416            lcall ?WriteData
+03EC 7420       417            mov a, #' '
+03EE 12007E     417            lcall ?WriteData
+03F1 E9         418            mov a, R1
+03F2 44C0       419            orl a, #0xc0
+03F4 120083     420            lcall ?WriteCommand 
+03F7 7407       421            mov a, #7
+03F9 12007E     421            lcall ?WriteData
+03FC 7407       422            mov a, #7
+03FE 12007E     422            lcall ?WriteData
+0401 7405       423            mov a, #5
+0403 12007E     423            lcall ?WriteData
+0406 7420       424            mov a, #' '
+0408 12007E     424            lcall ?WriteData
+040B 22         425            ret
+040C            426   
+040C            427   Draw_big_6:
+040C E9         428            mov a, R1
+040D 4480       429            orl a, #0x80 
+040F 120083     430            lcall ?WriteCommand 
+0412 7400       431            mov a, #0
+0414 12007E     431            lcall ?WriteData
+0417 7406       432            mov a, #6
+0419 12007E     432            lcall ?WriteData
+041C 7406       433            mov a, #6
+041E 12007E     433            lcall ?WriteData
+0421 7420       434            mov a, #' '
+0423 12007E     434            lcall ?WriteData
+0426 E9         435            mov a, R1
+0427 44C0       436            orl a, #0xc0
+0429 120083     437            lcall ?WriteCommand 
+042C 7403       438            mov a, #3
+042E 12007E     438            lcall ?WriteData
+0431 7407       439            mov a, #7
+0433 12007E     439            lcall ?WriteData
+0436 7405       440            mov a, #5
+0438 12007E     440            lcall ?WriteData
+043B 7420       441            mov a, #' '
+043D 12007E     441            lcall ?WriteData
+0440 22         442            ret
+0441            443   
+0441            444   Draw_big_7:
+0441 E9         445            mov a, R1
+0442 4480       446            orl a, #0x80 
+0444 120083     447            lcall ?WriteCommand 
+0447 7401       448            mov a, #1
+0449 12007E     448            lcall ?WriteData
+044C 7401       449            mov a, #1
+044E 12007E     449            lcall ?WriteData
+0451 7402       450            mov a, #2
+0453 12007E     450            lcall ?WriteData
+0456 7420       451            mov a, #' '
+0458 12007E     451            lcall ?WriteData
+045B E9         452            mov a, R1
+045C 44C0       453            orl a, #0xc0
+045E 120083     454            lcall ?WriteCommand 
+0461 7420       455            mov a, #' '
+0463 12007E     455            lcall ?WriteData
+0466 7420       456            mov a, #' '
+0468 12007E     456            lcall ?WriteData
+046B 7400       457            mov a, #0
+046D 12007E     457            lcall ?WriteData
+0470 7420       458            mov a, #' '
+0472 12007E     458            lcall ?WriteData
+0475 22         459            ret
+0476            460   
+0476            461   Draw_big_8:
+0476 E9         462            mov a, R1
+0477 4480       463            orl a, #0x80 
+0479 120083     464            lcall ?WriteCommand 
+047C 7400       465            mov a, #0
+047E 12007E     465            lcall ?WriteData
+0481 7406       466            mov a, #6
+0483 12007E     466            lcall ?WriteData
+0486 7402       467            mov a, #2
+0488 12007E     467            lcall ?WriteData
+048B 7420       468            mov a, #' '
+048D 12007E     468            lcall ?WriteData
+0490 E9         469            mov a, R1
+0491 44C0       470            orl a, #0xc0
+0493 120083     471            lcall ?WriteCommand 
+0496 7403       472            mov a, #3
+0498 12007E     472            lcall ?WriteData
+049B 7407       473            mov a, #7
+049D 12007E     473            lcall ?WriteData
+04A0 7405       474            mov a, #5
+04A2 12007E     474            lcall ?WriteData
+04A5 7420       475            mov a, #' '
+04A7 12007E     475            lcall ?WriteData
+04AA 22         476            ret
+04AB            477   
+04AB            478   Draw_big_9:
+04AB E9         479            mov a, R1
+04AC 4480       480            orl a, #0x80 
+04AE 120083     481            lcall ?WriteCommand 
+04B1 7400       482            mov a, #0
+04B3 12007E     482            lcall ?WriteData
+04B6 7406       483            mov a, #6
+04B8 12007E     483            lcall ?WriteData
+04BB 7402       484            mov a, #2
+04BD 12007E     484            lcall ?WriteData
+04C0 7420       485            mov a, #' '
+04C2 12007E     485            lcall ?WriteData
+04C5 E9         486            mov a, R1
+04C6 44C0       487            orl a, #0xc0
+04C8 120083     488            lcall ?WriteCommand 
+04CB 7420       489            mov a, #' '
+04CD 12007E     489            lcall ?WriteData
+04D0 7420       490            mov a, #' '
+04D2 12007E     490            lcall ?WriteData
+04D5 74FF       491            mov a, #255
+04D7 12007E     491            lcall ?WriteData
+04DA 7420       492            mov a, #' '
+04DC 12007E     492            lcall ?WriteData
+04DF 22         493            ret
+04E0            494   
+04E0            495   ; The number to display is passed in accumulator.  The column where to display the
+04E0            496   ; number is passed in R1. This works only for numbers 0 to 9.
+04E0            497   Display_big_number:
+04E0            498            ; We need to multiply the accumulator by 3 because the jump table below uses 3 bytes
+04E0            499            ; for each 'ljmp' instruction.
+04E0 75F003     500            mov b, #3
+04E3 A4         501            mul ab
+04E4 9004E8     502            mov dptr, #Jump_table
+04E7 73         503            jmp @A+dptr
+04E8            504   Jump_table:
+04E8 0202CE     505            ljmp Draw_big_0 ; This instruction uses 3 bytes
+04EB 020303     506            ljmp Draw_big_1
+04EE 020338     507            ljmp Draw_big_2
+04F1 02036D     508            ljmp Draw_big_3
+04F4 0203A2     509            ljmp Draw_big_4
+04F7 0203D7     510            ljmp Draw_big_5
+04FA 02040C     511            ljmp Draw_big_6
+04FD 020441     512            ljmp Draw_big_7
+0500 020476     513            ljmp Draw_big_8
+0503 0204AB     514            ljmp Draw_big_9
+0506            515   ; No 'ret' needed because we are counting of on the 'ret' provided by the Draw_big_x functions above
+0506            516   
+0506            517   
+0506            518   
+0506            519   
+0506            520   ; Takes a BCD 2-digit number passed in the accumulator and displays it at position passed in R0
+0506            521   Display_Big_BCD:
+0506 C0E0       522            push acc
+0508            523            ; Display the most significant decimal digit
+0508 88F0       524            mov b, R0
+050A A9F0       525            mov R1, b
+050C C4         526            swap a
+050D 540F       527            anl a, #0x0f
+050F 1204E0     528            lcall Display_big_number
+0512            529            
+0512            530            ; Display the least significant decimal digit, which starts 4 columns to the right of the most significant digit
+0512 E8         531            mov a, R0
+0513 2403       532            add a, #3
+0515 F9         533            mov R1, a
+0516 D0E0       534            pop acc
+0518 540F       535            anl a, #0x0f
+051A 1204E0     536            lcall Display_big_number
+051D            537            
+051D            538            
+051D 22         539            ret
+051E            540   
+051E            541   
+051E            542   
+051E            543    
+051E            544   ;---------------------------------;
+051E            545   ; Main program. Includes hardware ;
+051E            546   ; initialization and 'forever'    ;
+051E            547   ; loop.                           ;
+051E            548   ;---------------------------------;
+051E            549   main:
+051E            550            ; Initialization
+051E 75817F     551       mov SP, #0x7F
+0521 1200DC     552       lcall Timer0_Init
+0524 120114     553       lcall Timer2_Init
+0527            554       ; In case you decide to use the pins of P0 configure the port in bidirectional mode:
+0527 75E600     555       mov P0M0, #0
+052A 75E700     556       mov P0M1, #0
+052D D2AF       557       setb EA   ; Enable Global interrupts
+052F 120088     558       lcall LCD_4BIT
+0532 120188     559       lcall Custom_Characters ; Custom characters are needed to display big numbers.  This call generates them.
+0535 D200       560       setb half_seconds_flag
+0537 D281       561       setb HOUR_BUTTON 
+0539            562       ;cpl SOUND_OUT
+0539 753200     563            mov BCD_counter, #0x00
+053C            564            
+053C            565            
+053C            566            ; After initialization the program stays in this 'forever' loop
+053C            567   loop:
+053C 20A42B     568            jb SAVE_ALARM, Minutes_button  ; if the 'BOOT' button is not pressed skip
+053F C002       569            push AR2
+0541 7A32       569            mov R2, #50
+0543 120039     569            lcall ?Wait_Milli_Seconds
+0546 D002       569            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+0548 20A41F     570            jb SAVE_ALARM, Minutes_button ; if the 'BOOT' button is not pressed skip
+054B 30A4FD     571            jnb SAVE_ALARM, $               ; Wait for button release.  The '$' means: jump to same instruction.
+054E            572            
+054E 85363F     573            mov ALARM_hours,HOURS_counter
+0551 853345     574            mov ALARM_minutes,MIN_counter
+0554 853A4C     575            mov ALARM_am_pm_flag,AM_PM_flag
+0557            576            
+0557 7408       577            mov a, #0x08
+0559 120083     578       lcall ?WriteCommand
+055C            579       
+055C C002       580            push AR2
+055E 7AFF       580            mov R2, #255
+0560 120039     580            lcall ?Wait_Milli_Seconds
+0563 D002       580            pop AR2
+0565 740E       581       mov a, #0x0E
+0567 120083     582            lcall ?WriteCommand
+056A            583                    
+056A            584   Minutes_button:
+056A 20C523     585            jb BOOT_BUTTON, Hours_button  ; if the 'BOOT' button is not pressed skip
+056D C002       586            push AR2
+056F 7A32       586            mov R2, #50
+0571 120039     586            lcall ?Wait_Milli_Seconds
+0574 D002       586            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+0576 20C517     587            jb BOOT_BUTTON, Hours_button ; if the 'BOOT' button is not pressed skip
+0579 30C5FD     588            jnb BOOT_BUTTON, $              ; Wait for button release.  The '$' means: jump to same instruction.
+057C            589            ; A valid press of the 'BOOT' button has been detected, reset the BCD counter.
+057C            590            ; But first stop timer 2 and reset the milli-seconds counter, to resync everything.
+057C C2CA       591            clr TR2                 ; Stop timer 2
+057E            592            ;clr a
+057E E533       593            mov a,MIN_counter
+0580 2401       594            add a, #0x01
+0582 F533       595            mov MIN_counter, a
+0584 D4         596            da a
+0585 B46002     597            cjne a,#0x60,plusser
+0588 7400       598            mov a,#0x00
+058A            599   
+058A            600   plusser:
+058A F533       601            mov Min_counter, a
+058C D2CA       602            setb TR2                ; Start timer 2
+058E 8029       603            sjmp loop_b             ; Display the new value
+0590            604   
+0590            605   
+0590            606   Hours_button:
+0590 208123     607            jb HOUR_BUTTON, loop_a  ; if the 'BOOT' button is not pressed skip
+0593 C002       608            push AR2
+0595 7A32       608            mov R2, #50
+0597 120039     608            lcall ?Wait_Milli_Seconds
+059A D002       608            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+059C 208117     609            jb HOUR_BUTTON, loop_a   ; if the 'BOOT' button is not pressed skip
+059F 3081FD     610            jnb HOUR_BUTTON, $              ; Wait for button release.  The '$' means: jump to same instruction.
+05A2            611            
+05A2 C2CA       612            clr TR2                 ; Stop timer 2
+05A4            613            ;clr a
+05A4 E536       614            mov a,HOURS_counter
+05A6 2401       615            add a, #0x01
+05A8 F536       616            mov HOURS_counter, a
+05AA D4         617            da a
+05AB B41302     618            cjne a,#0x13,plusser_hour
+05AE 7401       619            mov a,#0x01
+05B0            620   
+05B0            621   plusser_hour:
+05B0 F536       622            mov HOURS_counter, a
+05B2 D2CA       623            setb TR2                ; Start timer 2
+05B4 8003       624            sjmp loop_b             ; Display the new value
+05B6            625   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+05B6            626            
+05B6            627            
+05B6            628            
+05B6            629                    
+05B6            630   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+05B6            631   
+05B6            632   loop_a:
+05B6 300083     633            jnb half_seconds_flag, loop
+05B9            634   loop_b:
+05B9 C200       635       clr half_seconds_flag ; We clear this flag in the main loop, but it is set in the ISR for timer 2
+05BB 7800       636       mov R0, #0 ; Column where to display the big font 2-digit number 
+05BD E536       637       mov a, HOURS_counter ; The number to display using big font
+05BF 120506     638            lcall Display_Big_BCD
+05C2 7807       639            mov R0, #7 ; Column where to display the big font 2-digit number
+05C4 E533       640       mov a, MIN_counter ; The number to display using big font
+05C6 120506     641            lcall Display_Big_BCD
+05C9            642   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+05C9            643                            
+05C9            644            
+05C9            645            
+05C9            646   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+05C9            647   Stopwatch:
+05C9 20A173     648            jb STOPWATCH_MODE, Timer  ; if the 'BOOT' button is not pressed skip
+05CC C002       649            push AR2
+05CE 7A32       649            mov R2, #50
+05D0 120039     649            lcall ?Wait_Milli_Seconds
+05D3 D002       649            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+05D5 20A167     650            jb STOPWATCH_MODE, Timer ; if the 'BOOT' button is not pressed skip
+05D8 30A1FD     651            jnb STOPWATCH_MODE, $           ; Wait for button release.  The '$' means: jump to same instruction.
+05DB            652            
+05DB 755601     653            mov STOPWATCH_starter, #0x01
+05DE 753201     654            mov BCD_counter,#0x01
+05E1 E556       655            mov a, STOPWATCH_starter
+05E3 B40159     656            cjne a,#0x01,Timer
+05E6            657   
+05E6            658   STOPWATCH_display:       
+05E6            659            
+05E6 E532       660            mov a, BCD_counter
+05E8 2401       661            add a,#0x01
+05EA C002       662            push AR2
+05EC 7AFF       662            mov R2, #255
+05EE 120039     662            lcall ?Wait_Milli_Seconds
+05F1 D002       662            pop AR2
+05F3 C002       663            push AR2
+05F5 7AFF       663            mov R2, #255
+05F7 120039     663            lcall ?Wait_Milli_Seconds
+05FA D002       663            pop AR2
+05FC C002       664            push AR2
+05FE 7AFF       664            mov R2, #255
+0600 120039     664            lcall ?Wait_Milli_Seconds
+0603 D002       664            pop AR2
+0605 C002       665            push AR2
+0607 7AFF       665            mov R2, #255
+0609 120039     665            lcall ?Wait_Milli_Seconds
+060C D002       665            pop AR2
+060E D4         666            da a
+060F F532       667            mov BCD_counter,a
+0611 B4600B     668            cjne a,#0x60,print_seconds ; adjust seconds limit here
+0614 E557       669            mov a, STOPWATCH_minutes
+0616 2401       670            add a,#0x01
+0618 F557       671            mov STOPWATCH_minutes,a
+061A 7400       672            mov a,#0x00
+061C 753200     673            mov BCD_Counter,#0x00
+061F            674            
+061F            675   print_seconds:   
+061F 7807       676            mov R0, #7 ; Column where to display the big font 2-digit number
+0621 E532       677       mov a, BCD_counter; The number to display using big font
+0623 120506     678            lcall Display_Big_BCD
+0626            679                    
+0626            680            
+0626            681   print_minutes:   
+0626            682            ;clr half_seconds_flag ; We clear this flag in the main loop, but it is set in the ISR for timer 2
+0626 7800       683       mov R0, #0 ; Column where to display the big font 2-digit number 
+0628 E557       684       mov a, STOPWATCH_minutes ; The number to display using big font
+062A 120506     685            lcall Display_Big_BCD
+062D            686            
+062D            687   check_for_recurring:
+062D            688            ;mov a,STOPWATCH_STARTER
+062D            689            
+062D 20A1B6     690            jb STOPWATCH_MODE, STOPWATCH_display ; if the 'BOOT' button is not pressed skip
+0630 C002       691            push AR2
+0632 7A32       691            mov R2, #50
+0634 120039     691            lcall ?Wait_Milli_Seconds
+0637 D002       691            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+0639 20A1AA     692            jb STOPWATCH_MODE, STOPWATCH_display; if the 'BOOT' button is not pressed skip
+063C 30A1FD     693            jnb STOPWATCH_MODE, $           ; Wait for button release.  The '$' means: jump to same instruction.
+063F            694            
+063F            695            
+063F            696            ;cjne a,#0x00,STOPWATCH_display
+063F            697   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+063F            698   Timer:
+063F 20A57D     699            jb TIMER_mode, Alarm_checker_check ; if the 'BOOT' button is not pressed skip
+0642 C002       700            push AR2
+0644 7A32       700            mov R2, #50
+0646 120039     700            lcall ?Wait_Milli_Seconds
+0649 D002       700            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+064B 20A571     701            jb TIMER_mode, Alarm_checker_check ; if the 'BOOT' button is not pressed skip
+064E 30A5FD     702            jnb TIMER_mode, $               ; Wait for button release.  The '$' means: jump to same instruction.
+0651            703            
+0651            704   Timer_subb:
+0651 E55D       705            mov a, TIMER_100
+0653 D4         706            da a
+0654 9401       707            subb a,#0x01
+0656 F55D       708            mov TIMER_100,a
+0658 B49004     709            cjne a,#0x90,check_80
+065B 7489       710            mov a,#0x89
+065D F55D       711            mov TIMER_100,a
+065F            712            
+065F            713   check_80:
+065F B48004     714            cjne a,#0x80,check_70
+0662 7479       715            mov a,#0x79
+0664 F55D       716            mov TIMER_100, a
+0666            717   
+0666            718   check_70:
+0666 B47004     719            cjne a,#0x70,check_60
+0669 7469       720            mov a,#0x69
+066B F55D       721            mov TIMER_100, a
+066D            722            
+066D            723   check_60:
+066D B46004     724            cjne a,#0x60,check_50
+0670 7459       725            mov a,#0x59
+0672 F55D       726            mov TIMER_100,a
+0674            727   
+0674            728   check_50:
+0674 B45004     729            cjne a,#0x50, print_timer
+0677 7449       730            mov a,#0x49
+0679 F55D       731            mov TIMER_100,a
+067B            732   
+067B            733            
+067B            734   print_timer:     
+067B 7800       735            mov R0, #0 ; Column where to display the big font 2-digit number 
+067D 7400       736       mov a, #0x00 ; The number to display using big font
+067F 120506     737            lcall Display_Big_BCD
+0682            738            
+0682 7807       739            mov R0, #7 ; Column where to display the big font 2-digit number
+0684 E55D       740       mov a, TIMER_100; The number to display using big font
+0686 120506     741            lcall Display_Big_BCD
+0689            742            
+0689 C002       743            push AR2
+068B 7AFF       743            mov R2, #255
+068D 120039     743            lcall ?Wait_Milli_Seconds
+0690 D002       743            pop AR2
+0692 C002       744            push AR2
+0694 7AFF       744            mov R2, #255
+0696 120039     744            lcall ?Wait_Milli_Seconds
+0699 D002       744            pop AR2
+069B C002       745            push AR2
+069D 7AFF       745            mov R2, #255
+069F 120039     745            lcall ?Wait_Milli_Seconds
+06A2 D002       745            pop AR2
+06A4 C002       746            push AR2
+06A6 7AFF       746            mov R2, #255
+06A8 120039     746            lcall ?Wait_Milli_Seconds
+06AB D002       746            pop AR2
+06AD            747            
+06AD 20A5A1     748            jb TIMER_mode, Timer_subb ; if the 'BOOT' button is not pressed skip
+06B0 C002       749            push AR2
+06B2 7A32       749            mov R2, #50
+06B4 120039     749            lcall ?Wait_Milli_Seconds
+06B7 D002       749            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+06B9 20A595     750            jb TIMER_mode, Timer_subb; if the 'BOOT' button is not pressed skip
+06BC 30A5FD     751            jnb TIMER_mode, $               ; Wait for button release.  The '$' means: jump to same instruction.
+06BF            752   
+06BF            753   
+06BF            754   
+06BF            755   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+06BF            756   Alarm_checker_check:     
+06BF 20845E     757            jb ALARM_MODE, Alarm_check  ; if the 'BOOT' button is not pressed skip
+06C2 C002       758            push AR2
+06C4 7A32       758            mov R2, #50
+06C6 120039     758            lcall ?Wait_Milli_Seconds
+06C9 D002       758            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+06CB 208452     759            jb ALARM_MODE, Alarm_check ; if the 'BOOT' button is not pressed skip
+06CE 3084FD     760            jnb ALARM_MODE, $               ; Wait for button release.  The '$' means: jump to same instruction.
+06D1            761   
+06D1 7800       762            mov R0, #0 ; Column where to display the big font 2-digit number 
+06D3 E53F       763            mov a, ALARM_hours ; The number to display using big font
+06D5 120506     764            lcall Display_Big_BCD
+06D8 7807       765            mov R0, #7 ; Column where to display the big font 2-digit number
+06DA E545       766            mov a, ALARM_minutes ; The number to display using big font
+06DC 120506     767            lcall Display_Big_BCD
+06DF            768            
+06DF 74C6       769            mov a,#0xc6
+06E1 120083     770            lcall ?WriteCommand
+06E4 742E       771            mov a,#'.'
+06E6 12007E     772            lcall ?WriteData
+06E9 7486       773            mov a,#0x86
+06EB 120083     774            lcall ?WriteCommand
+06EE 742E       775            mov a,#'.'
+06F0 12007E     776            lcall ?WriteData
+06F3            777   
+06F3            778   wait:    
+06F3 C002       779            push AR2
+06F5 7AFF       779            mov R2, #255
+06F7 120039     779            lcall ?Wait_Milli_Seconds
+06FA D002       779            pop AR2
+06FC C002       780            push AR2
+06FE 7AFF       780            mov R2, #255
+0700 120039     780            lcall ?Wait_Milli_Seconds
+0703 D002       780            pop AR2
+0705 C002       781            push AR2
+0707 7AFF       781            mov R2, #255
+0709 120039     781            lcall ?Wait_Milli_Seconds
+070C D002       781            pop AR2
+070E C002       782            push AR2
+0710 7AFF       782            mov R2, #255
+0712 120039     782            lcall ?Wait_Milli_Seconds
+0715 D002       782            pop AR2
+0717 C002       783            push AR2
+0719 7AFF       783            mov R2, #255
+071B 120039     783            lcall ?Wait_Milli_Seconds
+071E D002       783            pop AR2
+0720            784   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+0720            785            
+0720            786   
+0720            787            
+0720            788            
+0720            789            
+0720            790   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;    
+0720            791            
+0720            792            
+0720            793   Alarm_check:
+0720 20A012     794            jb STOP_ALARM, alarm_checker  ; if the 'BOOT' button is not pressed skip
+0723 C002       795            push AR2
+0725 7A32       795            mov R2, #50
+0727 120039     795            lcall ?Wait_Milli_Seconds
+072A D002       795            pop AR2         ; Debounce delay.  This macro is also in 'LCD_4bit.inc'
+072C 20A006     796            jb STOP_ALARM, alarm_checker ; if the 'BOOT' button is not pressed skip
+072F 30A0FD     797            jnb STOP_ALARM, $               ; Wait for button release.  The '$' means: jump to same instruction.
+0732            798            
+0732 755400     799            mov ALARM_stop,#0x00
+0735            800            
+0735            801            
+0735            802   alarm_checker:
+0735 E536       803            mov a, HOURS_counter
+0737 B53F17     804            cjne a,ALARM_hours, Write_divider
+073A E533       805            mov a, MIN_counter
+073C B5450C     806            cjne a,ALARM_minutes, Alarm_flag_setter
+073F E53A       807            mov a, AM_PM_flag
+0741 B54C0D     808            cjne a,ALARM_am_pm_flag,Write_divider
+0744 E554       809            mov a, ALARM_stop
+0746 B40108     810            cjne a,#0x01, Write_divider
+0749 B2B7       811            cpl SOUND_OUT
+074B            812   
+074B            813   Alarm_flag_setter:
+074B 755401     814            mov ALARM_stop,#0x01
+074E 020751     815            ljmp Write_divider
+0751            816   
+0751            817   Write_divider:
+0751 7486       818            mov a,#0x86
+0753 120083     819            lcall ?WriteCommand
+0756 742E       820            mov a,#'.'
+0758 12007E     821            lcall ?WriteData
+075B            822            
+075B C0E0       823            push acc
+075D 740F       823            mov a, #15
+075F 14         823            dec a
+0760 1200C1     823            lcall ?Set_Cursor_1 ; Select column and row
+0763 D0E0       823            pop acc
+0765 C000       824            push ar0
+0767 A832       824            mov r0, BCD_counter
+0769 1200C6     824            lcall ?Display_BCD
+076C D000       824            pop ar0
+076E            825   
+076E            826            
+076E 74C6       827            mov a,#0xc6
+0770 120083     828            lcall ?WriteCommand
+0773 742E       829            mov a,#'.'
+0775 12007E     830            lcall ?WriteData
+0778            831            
+0778 74CF       832            mov a,#0xcf
+077A 120083     833            lcall ?WriteCommand
+077D 746D       834            mov a,#'m'
+077F 12007E     835            lcall ?WriteData
+0782            836            
+0782 AA36       837            mov R2, HOURS_counter
+0784 BA110D     838            cjne R2,#0x11,check_flag ; AM TO PM
+0787 AA33       839            mov R2,MIN_counter
+0789 BA5908     840            cjne R2,#0x59,check_flag
+078C AA32       841            mov R2,BCD_counter
+078E BA5903     842            cjne R2,#0x59,check_flag
+0791 02079C     843            ljmp change_am_pm
+0794            844            
+0794            845   check_flag:
+0794 AA3A       846            mov R2,AM_PM_flag
+0796 BA0021     847            cjne R2,#0x00,pm
+0799 0207AD     848            ljmp am
+079C            849   
+079C            850   change_am_pm:
+079C AA3A       851            MOV R2,AM_PM_flag
+079E BA0006     852            cjne R2,#0x00, make_0
+07A1 753A01     853            mov AM_PM_flag,#0x01
+07A4 020794     854            ljmp check_flag
+07A7            855   
+07A7            856   make_0:
+07A7 753A00     857            mov AM_PM_flag,#0x00
+07AA 020794     858            ljmp check_flag
+07AD            859                     
+07AD            860   am:
+07AD 74CE       861            mov a,#0xce
+07AF 120083     862            lcall ?WriteCommand
+07B2 7461       863            mov a,#'a'
+07B4 12007E     864            lcall ?WriteData 
+07B7 02053C     865            ljmp loop
+07BA            866            
+07BA            867   pm:
+07BA 74CE       868            mov a,#0xce
+07BC 120083     869            lcall ?WriteCommand
+07BF 7470       870            mov a,#'p'
+07C1 12007E     871            lcall ?WriteData
+07C4 02053C     872       ljmp loop
+07C7            873       
+07C7            874   
+07C7            875       
+07C7            876   END
